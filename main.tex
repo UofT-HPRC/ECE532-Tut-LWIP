@@ -13,7 +13,7 @@
 
 \title{ECE532S Digital Systems Design \\ \vspace{0.4cm}
        \Large Tutorial 5 - TCP Client on Microblaze Using LWIP \\ \vspace{0.4cm}
-       \small Last Updated: July, 2019}
+       \small Last Updated: Jan, 2021}
 \author{ }
 \date{ }
 
@@ -21,7 +21,58 @@
 \maketitle
 \vspace{-1cm}
 
-The goal of this tutorial is to demonstrate how to implement an LWIP-based TCP client on the Nexsys DDR board. LWIP is a specific low-overhead implementation of the TCP/IP stack that Xilinx has implemented for their MicroBlaze processor. The LWIP client introduced in this tutorial will be implemented using the Xilinx SDK, running on a Microblaze-based SoC system. This tutorial builds upon other tutorials already presented earlier in the course. The tutorial will demonstrate how to setup an LWIP connection as a client, how to setup the callback functions to respond to ACKs and received packets, and how to connect to a TCP echo server on a host computer to the test the functionality of the LWIP client.
+The goal of this tutorial is to demonstrate how to implement an LWIP-based TCP client on the Nexsys DDR board. LWIP is a specific low-overhead implementation of the TCP/IP stack that Xilinx has implemented for their MicroBlaze processor. The LWIP client introduced in this tutorial will be implemented using the Xilinx SDK, running on a Microblaze-based SoC system. This tutorial builds upon other tutorials already presented earlier in the course. The tutorial will demonstrate how to setup an LWIP connection as a client, how to setup the callback functions to respond to ACKs and received packets, and how to connect to a TCP echo server on a host computer to test the functionality of the LWIP client.
+
+\section*{Brief Networking Intro}
+Before we get into the implementation details of this tutorial, it is necessary to introduce some networking topics. This will not be an in depth discussion of networking, as that is outside the scope of this course, and students are encouraged to research those topics on their own or in other courses. Network protocols are divided into layers within what is often referred to as the \textit{Internet Protocol Stack}, which is based on the \textit{Open Systems Interconnect (OSI)} networking model. The OSI model contains 7 protocol layers, whereas the \textit{Internet Protocol Stack} contains only 5 layers:
+
+\renewcommand{\labelitemi}{$\circ$}
+\renewcommand{\labelitemii}{$\circ$}
+\renewcommand{\labelitemiii}{$\circ$}
+\renewcommand{\labelitemiv}{$\circ$}
+
+\begin{itemize}
+    \item \textit{Layer 1} is the \textbf{Physical Network} layer, and defines the physical connectivity of network devices and the signalling techniques used to communicate over those connections. If we were designing hardware that were to connect directly to the Ethernet pins of the FPGA, this layer would be important to consider. However, Xilinx has implemented Ethernet controllers we can use with our Vivado license, so we won't need to consider the details of Layer 1.
+    \item \textit{Layer 2} is the \textbf{Data Link layer}, and it defines the first layer of addressing used when communicating between nodes on a single network. The \textit{Internet Protocol Stack } generally uses the \textit{Media Access Control (MAC)} protocol at layer 2. A \textit{MAC} packet includes a \textit{Source MAC} address, a \textit{Destination MAC} address, and other details we won't discuss here. 
+    \begin{itemize}
+        \item When sending packets over a \textit{MAC}-based network, we must ensure that we use proper MAC addresses in our packets.
+        \item Unique MAC-addresses are automatically assigned to the \textit{Network Interface Controllers (NICs)} installed in our Desktops/Laptops; we should not override those values.
+        \item The FPGAs on the other hand need user-defined MAC addresses (defined using the macro \textit{SRC\_MAC\_ADDR} in the \textit{LWIP} code of Figure~3).
+        \item If you are setting up your own network, use unique addresses for each device where the least significant bit of the most significant byte is zero (otherwise you will be generating a multicast packet, not the point-to-point connection we generally require). In the \textit{LWIP} code of Figure~3, the Source MAC address has a most significant byte of \textit{0x00}, which has a zero least significant bit.
+        \item If you are using a network that has been setup for you, perhaps over some remote connection, please contact your network administrator for which MAC address you should assign to your FPGA, otherwise the communication may not proceed as you expect. This will require modifying the \textit{LWIP} code of Figure~3.
+    \end{itemize}
+    \item \textit{Layer 3} is the \textbf{Internet Layer}, and it defines the second layer of addressing used in the network communications of the internet. The \textit{Internet Protocol Stack } generally uses the \textit{Internet Protocol 4 (IPv4)}  or the \textit{Internet Protocol 6 (IPv6) }protocol at layer 2 (we will use \textit{IPv4}). An \textit{IPv4} packet includes a \textit{Source IP} address, a \textit{Destination IP} address, and other details we won't discuss here.
+    \begin{itemize}
+        \item Unlike MAC-addresses, the IP~address of our Desktops/Laptops aren't automatically defined by the manufacturer.
+        \item IP~addresses can be obtained by devices automatically using the \textit{DHCP} protocol (details are left to the reader to research), but DHCP requires that some gateway (i.e. a router) exist on the network and the gateway address of both the Desktop/Laptop and the FPGA are set correctly to the IP address of that gateway.
+        \item Alternatively, and the easier system to use for the purposes of this course, IP~addresses can be statically assigned by the user (i.e. us in this tutorial)
+        \item At layer~3, we must not only ensure that we use proper IP~addresses in our packets, but also that we set the \textit{Subnet Mask} of our endpoints correctly. 
+        \begin{itemize}
+            \item A subnet mask defines those bits that must match in the source address of a received packet for that packet not to be dropped.
+            \item For example, a common subnet mask (and the subnet mask set by default in the \textit{LWIP} code of Figure~3) is 255.255.255.0
+            \item If we convert this subnet mask to binary, we get 11111111.11111111.11111111.00000000; for each bit that is a 1 in this mask, the corresponding bit in the source IP address of a received packet must match that bit in the receiving device's IP address.
+            \item For the default settings in the \textit{LWIP} code of Figure~3, any packet received by the FPGA which does not have an IP address beginning with 192.168.1. will be dropped by the FPGA.
+        \end{itemize}
+        \item If you are setting up your own network, you are free to set the subnet mask as you wish, as long as the subnet mask is set such that all the devices you want to communicate can communicate with each other
+        \item If you are setting up your own network, you are free to set all the IP addresses of the devices as you wish as long as each device has a unique IP address and you do not use a broadcast or multicast address
+        \begin{itemize}
+            \item The all ones IP address (255.255.255.255) is the global broadcast IP address.
+            \item The IP address with those bits not set to 1 in the Subnet Mask set to 1 in the IP address (e.g. 192.168.1.255 for the default subnet and IP address in the LWIP code) is the broadcast IP address of that subnet.
+            \item The range of IP addresses from 224.0.0.0 through 239.255.255.255 are mutlicast IP addresses.
+        \end{itemize}
+        \item If you are using a network that has been setup for you, perhaps over some remote connection, please contact your network administrator for which IP addresses and subnet masks you should set on the FPGA, otherwise the communication may not proceed as you expect and you may even disrupt communications for other users on the network.
+    \end{itemize}
+    \item \textit{Layer 4} is the \textbf{Transport Layer}, and it is responsible for ensuring that packets arrive in the correct sequence and without error. In this tutorial, the \textit{Transmission Control Protocol (TCP)} is used, but another popular \textit{Layer 4} protocol you may want to look into is the \textit{User Datagram Protocol (UDP)}.
+    \begin{itemize}
+        \item \textit{TCP} packets contain a source and destination port, which defines one channel of communication between two devices.
+        \item Typically a device on the network can act as a \textit{server} by listening to communication received on a specific port and responding to those communications.
+        \item A \textit{client} is the device that initiates the communication to the server, by sending a \textit{TCP} packet to the port that the server is listening on.
+        \item The source port the client uses to the send the packet to the server often doesn't matter, and is generally used by the server as its destination address when responding to the message
+        \item For the \textit{server} python code of Figure~2, the server is listening for communications on its port~22.
+        \item For the \textit{client} LWIP code of Figure~3, the destination port is correctly set to port 22 and the source port is set to some random port (port 7 in this case).
+    \end{itemize}
+    \item \textit{Layer 5} is the \textbf{Application Layer}, and it is generally designed for each application depending on that application's needs. We will not discuss this layer in detail.
+\end{itemize}
 
 \section*{Step 1 - Digilent LWIP Server Tutorial}
 The LWIP client presented in this tutorial is based on the system and software environment setup in the Digilent LWIP echo server tutorial. Therefore, as a first step, you are required to go through and implement the described systems of that tutorial. For the Nexsys DDR board, the tutorial is available \href{https://reference.digilentinc.com/learn/programmable-logic/tutorials/nexys-4-ddr-getting-started-with-microblaze-servers/start}{\color{blue}here}. Some changes must be made to the tutorial for our purposes, so please follow the tutorial based on the steps and required modifications listed below.
@@ -52,12 +103,12 @@ The LWIP client presented in this tutorial is based on the system and software e
 \begin{figure}[t]
 \centering
 \includegraphics[width=\textwidth]{mb_cust4.png}
-\caption{Microbalze customization interface (page 4) showing how to enable the Peripheral AXI Interface for instructions}
+\caption{Microblaze customization interface (page 4) showing how to enable the Peripheral AXI Interface for instructions}
 \label{fig:mb_cust4}
 \end{figure}
 
 \section*{Step 2 - Modifications to Create LWIP Client}
-The SDK project, as created according to the LWIP echo server example project, can be modified into an LWIP cleint application instead. In this section, we describe how to create a simple LWIP TCP client that simply sends a single packet once a connection to a TCP server has been established. The TCP server will be implemented on an x86 host using an included python script.
+The SDK project, as created according to the LWIP echo server example project, can be modified into an LWIP client application instead. In this section, we describe how to create a simple LWIP TCP client that simply sends a single packet once a connection to a TCP server has been established. The TCP server will be implemented on an x86 host using an included python script.
 
 \begin{enumerate}
     \item Replace the \textit{main.c} file of the echo server application with the \textit{main.c} file packaged with this tutorial
@@ -66,6 +117,8 @@ The SDK project, as created according to the LWIP echo server example project, c
     \item Setup the network connection on your host x86 machine according to steps 14.1 through 14.2.5 of the Digilent tutorial
     \begin{itemize}
         \item These instructions are based on a Windows 7 operating system, please find the correct steps for your particular system
+        
+        \item IMPORTANT: The IP Address that you assign your host machine and \textit{DEST\_IP4\_ADDR} in \textit{main.c} \textbf{must match}. \textit{DEST\_IP4\_ADDR} is set to \textbf{192.168.1.11} by default (see Figure \ref{fig:code_pre})
     \end{itemize}
     \item Make sure to turn off the firewall on your host machine
     \item Run the \textit{echo.py} Python script packaged with this tutorial, this will start a TCP echo server on your host machine on Port 22, see Figure~\ref{fig:echo_py}
@@ -146,7 +199,7 @@ After setting up the network interface, the DHCP protocol is implemented in a lo
 Finally, we get to the main part of the application, shown in Figure~\ref{fig:code_main}. Before the main event loop, we have a call to a function we've created to setup the TCP connection and connect to the remote server. Then, inside the event loop, we first check our \textit{extern} TCP variables to determine whether LWIP needs to do some TCP processing. This check must be done periodically (on the order of 250 milliseconds) for LWIP to function correctly. Then, we call our \textit{xemacif\_input(...)} function to handoff any new data received to LWIP to be processed. Finally, at the end of the event loop, any additional code that needs to be run periodically can be added. Any code added here should be non-blocking (i.e. so that the TCP processing part of the loop can be checked regularly). Note also that the \textit{is\_connected} global variable we've declared can be used here if any of the functionality depends on whether or not a TCP connection has been established.
 
 \subsubsection*{Setting Up the TCP Client Connection}
-The TCP client connection is created in the \textit{setup\_client\_connection()} function defined underneath the main function, see Figure~\ref{fig:code_setup_conn}. The first thing to note in this function is the new TCP protocol control block (PCB) created with the function \textit{tcp\_new\_ip\_type(...)}. This function call is required to start the TCP connection creation process. Next, the call to function \textit{tcp\_bind(...)} binds the connection to a certain source port (Note, the \textit{tcp\_bind(...)} call is optional for client TCP projects). Finally, the function \textit{tcp\_connect(...)} initiates the client connection to the server. As parameters, the \textit{tcp\_connect(...)} function accepts the remote IP address to connect to, the destination port to connect to, and a callback function to be executed when the connection is made.
+The TCP client connection is created in the \textit{setup\_client\_conn()} function defined underneath the main function, see Figure~\ref{fig:code_setup_conn}. The first thing to note in this function is the new TCP protocol control block (PCB) created with the function \textit{tcp\_new\_ip\_type(...)}. This function call is required to start the TCP connection creation process. Next, the call to function \textit{tcp\_bind(...)} binds the connection to a certain source port (Note, the \textit{tcp\_bind(...)} call is optional for client TCP projects). Finally, the function \textit{tcp\_connect(...)} initiates the client connection to the server. As parameters, the \textit{tcp\_connect(...)} function accepts the remote IP address to connect to, the destination port to connect to, and a callback function to be executed when the connection is made.
 
 \subsubsection*{TCP Connection Completed Callback}
 Once a connection has been established with the server, the callback function associated with the \textit{tcp\_connect(...)} instance that initiated that connection will be called. The function we've used in our implementation is shown in Figure~\ref{fig:code_conn_callback}. First we check for an error in establishing the connection, and close the client connection if we do have an error. Otherwise, we make sure to store the new protocol control block handler (PCB) handler in the global variable we've created so other functions can access the TCP connection.
